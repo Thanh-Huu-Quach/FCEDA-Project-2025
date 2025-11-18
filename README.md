@@ -3,9 +3,8 @@ FCEDA Business Data Automation & Visualization
 Improving Processing/Analysis Time on Large Datasets Built for the Fairfax County Economic Development Authority (FCEDA)
 George Mason University | MIS 462 PREP Project
 
-#Team Members
-
-Thanh Quach
+#Team Members:
+ * Thanh Quach
 Faculty: Dr. Brian K. Ngac
 Agency: Fairfax County Economic Development Authority
 #Project Overview
