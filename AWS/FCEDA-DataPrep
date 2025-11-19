@@ -1,179 +1,275 @@
 import json
 import os
 import io
+
 import boto3
 import pandas as pd
 
-# -------------------------------
-# Dataset Prep
-# -------------------------------
-def clean_application_file(df):
-    # Keep only required columns
-    keep_columns = ['patent_id', 'filing_date']
-    df = df[keep_columns].copy()
-    # Remove tabs from string columns
-    for col in df.select_dtypes(include='object').columns:
-        df[col] = df[col].str.replace(r'\t', '', regex=True).str.strip()
-    # Convert filing_date to datetime (same as col_date())
-    df['filing_date'] = pd.to_datetime(df['filing_date'], errors='coerce')
-    # If you want to extract only the year (like R format "Y"):
-    df['filing_year'] = df['filing_date'].dt.year
-    # Remove duplicates and reset index
-    df = df.drop_duplicates().reset_index(drop=True)
-    return df
-
-def clean_assignee_file(df):
-    # Keep only required columns
-    keep_columns = ['patent_id', 'assignee_id', 'assignee_type', 'assignee_sequence', 'disambig_assignee_individual_name_first', 'disambig_assignee_individual_name_last', 'disambig_assignee_organization', 'location_id']
-    df = df[keep_columns].copy()
-    # Remove tabs from string columns
-    for col in df.select_dtypes(include='object').columns:
-        df[col] = df[col].str.replace(r'\t', '', regex=True).str.strip()
-    # Keep only primary assignee (assignee_sequence == 0)
-    df = df[df['assignee_sequence'] == '0']
-    # Remove duplicates and reset index
-    df = df.drop_duplicates().reset_index(drop=True)
-    return df
-
-def clean_location_file(df):
-    # Keep only required columns
-    keep_columns = ['location_id', 'disambig_city', 'disambig_state', 'disambig_country', 'county']
-    df = df[keep_columns].copy()
-    # Remove tabs from string columns
-    for col in df.select_dtypes(include='object').columns:
-        df[col] = df[col].str.replace(r'\t', '', regex=True).str.strip()
-    # Keep only US records (disambig_country == 'VA')
-    df = df[df['disambig_state'] == 'VA']
-    # Remove duplicates and reset index
-    df = df.drop_duplicates().reset_index(drop=True)
-    return df
-
-def clean_cpc_current_file(df):
-    # Keep only required columns
-    keep_columns = ['patent_id', 'cpc_sequence', 'cpc_section', 'cpc_class', 'cpc_subclass', 'cpc_group']
-    df = df[keep_columns].copy()
-    # Remove tabs from string columns
-    for col in df.select_dtypes(include='object').columns:
-        df[col] = df[col].str.replace(r'\t', '', regex=True).str.strip()
-    # Keep only primary classification (cpc_sequence == 0)
-    df = df[df['cpc_sequence'] == '0']
-    # Remove duplicates and reset index
-    df = df.drop_duplicates().reset_index(drop=True)
-    return df
-
-def clean_cpc_title_file(df):
-    # Keep only required columns
-    keep_columns = ['cpc_class', 'cpc_class_title', 'cpc_subclass', 'cpc_subclass_title', 'cpc_group', 'cpc_group_title']
-    df = df[keep_columns].copy()
-    # Remove tabs from string columns
-    for col in df.select_dtypes(include='object').columns:
-        df[col] = df[col].str.replace(r'\t', '', regex=True).str.strip()
-    # Remove duplicates and reset index
-    df = df.drop_duplicates().reset_index(drop=True)
-    return df
-
-# Mapping filename -> cleaning function
-CLEANING_STRATEGIES = {
-    "g_application.tsv": clean_application_file,
-    "g_assignee_disambiguated.tsv": clean_assignee_file,
-    "g_location_disambiguated.tsv": clean_location_file,
-    "g_cpc_current.tsv": clean_cpc_current_file,
-    "g_cpc_title.tsv": clean_cpc_title_file,
-}
-
-# Raw bucket where your TSV files live
-RAW_BUCKET = os.getenv("RAW_BUCKET", "gmupatentproject26")
-RAW_PREFIX = "Dataset/"   # folder in the raw bucket
-
-# Clean bucket where cleaned CSVs will be written
-CLEAN_BUCKET = os.getenv("CLEAN_BUCKET", "gmupatentproject26cleandata")
-
-s3 = boto3.client("s3")
-
-# -------------------------------
-# CLEANING FUNCTIONS (5 DATASETS)
-# -------------------------------
+lambda_client = boto3.client("lambda")
 
 def lambda_handler(event, context):
-    """
-    Initial clean for 5 patent datasets.
-    - Reads TSVs from RAW_BUCKET/Dataset/
-    - Applies cleaning functions
-    - Writes cleaned CSVs into CLEAN_BUCKET under cleaned/
-    """
-    print(f"RAW_BUCKET = {RAW_BUCKET}")
-    print(f"CLEAN_BUCKET = {CLEAN_BUCKET}")
+    # S3 event data
+    record = event["Records"][0]
+    bucket = record["s3"]["bucket"]["name"]
+    key = record["s3"]["object"]["key"]
 
-    # List all objects under RAW_PREFIX
-    response = s3.list_objects_v2(Bucket=RAW_BUCKET, Prefix=RAW_PREFIX)
-    objects = response.get("Contents", [])
+    # Build a payload that all steps understand
+    payload = {
+        "raw_bucket": bucket,
+        "raw_key": key,
+        "clean_bucket": "gmupatentproject26cleandata"
+    }
 
-    while response.get("IsTruncated"):
-        token = response.get("NextContinuationToken")
-        response = s3.list_objects_v2(
-            Bucket=RAW_BUCKET,
-            Prefix=RAW_PREFIX,
-            ContinuationToken=token,
-        )
-        objects.extend(response.get("Contents", []))
+    # Call Lambda 2 synchronously
+    resp2 = lambda_client.invoke(
+        FunctionName="lambda_step2_clean",
+        InvocationType="RequestResponse",
+        Payload=json.dumps(payload).encode("utf-8")
+    )
+    step2_output = json.load(resp2["Payload"])
 
-    results = {}
+    # Call Lambda 3, passing output from step 2
+    resp3 = lambda_client.invoke(
+        FunctionName="lambda_step3_transform",
+        InvocationType="RequestResponse",
+        Payload=json.dumps(step2_output).encode("utf-8")
+    )
+    step3_output = json.load(resp3["Payload"])
 
-    for obj in objects:
-        key = obj["Key"]
-        filename = os.path.basename(key)
+    # Call Lambda 4
+    resp4 = lambda_client.invoke(
+        FunctionName="lambda_step4_export",
+        InvocationType="Event",  # fire and forget if you want
+        Payload=json.dumps(step3_output).encode("utf-8")
+    )
 
-        # ignore folders / unknown files
-        if filename not in CLEANING_STRATEGIES:
-            print(f"Skipping {key} (no cleaning strategy).")
-            continue
+    return {"status": "pipeline_started"}
+s3 = boto3.client("s3")
 
-        print(f"Processing {key}...")
+RAW_BUCKET = os.getenv("RAW_BUCKET", "gmupatentproject26")
+CLEAN_BUCKET = os.getenv("CLEAN_BUCKET", "gmupatentproject26cleandata")
 
-        try:
-            # Read TSV from S3
-            resp = s3.get_object(Bucket=RAW_BUCKET, Key=key)
-            content = resp["Body"].read()
-            df_raw = pd.read_csv(
-                io.BytesIO(content),
-                sep="\t",
-                dtype="string",
-                low_memory=False,
-            )
+# Input files
+RAW_ASSIGNEE_KEY = "Dataset/g_assignee_disambiguated.tsv"
+RAW_LOCATION_KEY = "Dataset/g_location_disambiguated.tsv" 
+RAW_APPLICATION_KEY = "Dataset/g_application.tsv"
 
-            # Clean using appropriate function
-            cleaning_fn = CLEANING_STRATEGIES[filename]
-            df_clean = cleaning_fn(df_raw)
+# Output file (merged)
+CLEAN_KEY = "cleaned/g_import json
+import boto3
 
-            # Build cleaned key name in clean bucket
-            cleaned_key = f"cleaned/{filename.replace('.tsv', '_clean.csv')}"
-            cleaned_bytes = df_clean.to_csv(index=False).encode("utf-8")
+lambda_client = boto3.client("lambda")
 
-            # Upload cleaned CSV
-            s3.put_object(
-                Bucket=CLEAN_BUCKET,
-                Key=cleaned_key,
-                Body=cleaned_bytes,
-            )
+CLEAN_BUCKET = "gmupatentproject2clean"   # <- your clean bucket
 
-            print(f"Uploaded cleaned file to s3://{CLEAN_BUCKET}/{cleaned_key}")
-            results[filename] = {
-                "rows": int(len(df_clean)),
-                "cleaned_key": cleaned_key,
-            }
+def lambda_handler(event, context):
+    # S3 event data (which raw file was uploaded)
+    record = event["Records"][0]
+    bucket = record["s3"]["bucket"]["name"]
+    key = record["s3"]["object"]["key"]
 
-        except Exception as e:
-            print(f"Error processing {key}: {e}")
-            results[filename] = {"error": str(e)}
+    print(f"Orchestrator triggered by: s3://{bucket}/{key}")
+
+    # Base payload that all step Lambdas understand
+    base_payload = {
+        "raw_bucket": bucket,
+        "raw_key": key,                # some steps will ignore this
+        "clean_bucket": CLEAN_BUCKET,
+    }
+
+    # ---- Step 1: clean application (always safe to call, it just overwrites) ----
+    lambda_client.invoke(
+        FunctionName="lambda_clean_application",   # <- exact name in AWS
+        InvocationType="RequestResponse",
+        Payload=json.dumps(base_payload).encode("utf-8"),
+    )
+
+    # ---- Step 2: clean assignee + location + application (VA) ----
+    lambda_client.invoke(
+        FunctionName="lambda_clean_assignee_location_app",
+        InvocationType="RequestResponse",
+        Payload=json.dumps(base_payload).encode("utf-8"),
+    )
+
+    # ---- Step 3: CPC current + title merged ----
+    lambda_client.invoke(
+        FunctionName="lambda_clean_cpc_merged",
+        InvocationType="RequestResponse",
+        Payload=json.dumps(base_payload).encode("utf-8"),
+    )
+
+    # ---- Step 4: final master dataset ----
+    lambda_client.invoke(
+        FunctionName="lambda_build_master_dataset",
+        InvocationType="Event",  # fire-and-forget is OK for final step
+        Payload=json.dumps(base_payload).encode("utf-8"),
+    )
+
+    return {"status": "pipeline_started"}
+_clean.csv"
+
+def clean_application_file(df: pd.DataFrame) -> pd.DataFrame:
+    keep_columns = ["patent_id", "filing_date"]
+    df = df[keep_columns].copy()
+
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.replace(r"\t", "", regex=True).str.strip()
+
+    df["filing_date"] = pd.to_datetime(df["filing_date"], errors="coerce")
+    df["filing_year"] = df["filing_date"].dt.year
+    df = df.drop_duplicates().reset_index(drop=True)
+    return df
+
+def clean_assignee_file(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only primary assignee records and selected columns."""
+    keep_columns = [
+        "patent_id",
+        "assignee_id",
+        "assignee_type",
+        "assignee_sequence",
+        "disambig_assignee_individual_name_first",
+        "disambig_assignee_individual_name_last",
+        "disambig_assignee_organization",
+        "location_id",
+    ]
+    df = df[keep_columns].copy()
+
+    # Clean string columns
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.replace(r"\t", "", regex=True).str.strip()
+
+    # Keep only primary assignee
+    df = df[df["assignee_sequence"] == "0"]
+
+    # Drop duplicates
+    df = df.drop_duplicates().reset_index(drop=True)
+    return df
+
+
+def clean_location_file(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only VA locations and selected columns."""
+    keep_columns = [
+        "location_id",
+        "disambig_city",
+        "disambig_state",
+        "disambig_country",
+        "county",
+    ]
+    df = df[keep_columns].copy()
+
+    # Clean string columns
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.replace(r"\t", "", regex=True).str.strip()
+
+    # Keep only Virginia records
+    df = df[df["disambig_state"] == "VA"]
+
+    # Drop duplicates
+    df = df.drop_duplicates().reset_index(drop=True)
+    return df
+
+
+def lambda_handler(event, context):
+    # ---------- 1) Read & clean ASSIGNEE ----------
+    print(f"Processing assignee file: s3://{RAW_BUCKET}/{RAW_ASSIGNEE_KEY}")
+
+    resp_assignee = s3.get_object(Bucket=RAW_BUCKET, Key=RAW_ASSIGNEE_KEY)
+    content_assignee = resp_assignee["Body"].read()
+
+    df_assignee_raw = pd.read_csv(
+        io.BytesIO(content_assignee),
+        sep="\t",
+        dtype="string",
+        usecols=[
+            "patent_id",
+            "assignee_id",
+            "assignee_type",
+            "assignee_sequence",
+            "disambig_assignee_individual_name_first",
+            "disambig_assignee_individual_name_last",
+            "disambig_assignee_organization",
+            "location_id",
+        ],
+        low_memory=False,
+    )
+
+    df_assignee_clean = clean_assignee_file(df_assignee_raw)
+    print(f"Assignee rows after cleaning: {len(df_assignee_clean)}")
+
+    # ---------- 2) Read & clean LOCATION ----------
+    print(f"Processing location file: s3://{RAW_BUCKET}/{RAW_LOCATION_KEY}")
+
+    resp_location = s3.get_object(Bucket=RAW_BUCKET, Key=RAW_LOCATION_KEY)
+    content_location = resp_location["Body"].read()
+
+    df_location_raw = pd.read_csv(
+        io.BytesIO(content_location),
+        sep="\t",
+        dtype="string",
+        usecols=[
+            "location_id",
+            "disambig_city",
+            "disambig_state",
+            "disambig_country",
+            "county",
+        ],
+        low_memory=False,
+    )
+
+    df_location_clean = clean_location_file(df_location_raw)
+    print(f"Location rows after cleaning (VA only): {len(df_location_clean)}")
+
+    # ---------- 3) MERGE ASSIGNEE + LOCATION ----------
+    df_assignee_loc = pd.merge(
+        df_assignee_clean,
+        df_location_clean,
+        on="location_id",
+        how="inner",  # inner = only assignees that have a VA location
+    )
+
+    df_assignee_loc = df_assignee_loc.drop_duplicates().reset_index(drop=True)
+    print(f"Merged assignee+location (VA only) rows: {len(df_assignee_loc)}")
+
+    # ---------- 4) Read & clean APPLICATION ----------
+    print(f"Processing application file: s3://{RAW_BUCKET}/{RAW_APPLICATION_KEY}")
+
+    resp_app = s3.get_object(Bucket=RAW_BUCKET, Key=RAW_APPLICATION_KEY)
+    content_app = resp_app["Body"].read()
+
+    df_app_raw = pd.read_csv(
+        io.BytesIO(content_app),
+        sep="\t",
+        dtype="string",
+        usecols=["patent_id", "filing_date"],
+        low_memory=False,
+    )
+
+    df_app_clean = clean_application_file(df_app_raw)
+    print(f"Application rows after cleaning: {len(df_app_clean)}")
+
+    # ---------- 5) MERGE WITH APPLICATION ON patent_id ----------
+    df_final = pd.merge(
+        df_assignee_loc,
+        df_app_clean,
+        on="patent_id",
+        how="left",  # keep all VA assignees; add filing info when available
+    )
+
+    df_final = df_final.drop_duplicates().reset_index(drop=True)
+    print(f"Final merged rows (assignee + location VA + application): {len(df_final)}")
+
+    # ---------- 6) Write merged CSV to S3 ----------
+    csv_bytes = df_final.to_csv(index=False).encode("utf-8")
+
+    s3.put_object(Bucket=CLEAN_BUCKET, Key=CLEAN_KEY, Body=csv_bytes)
 
     return {
         "statusCode": 200,
         "body": json.dumps(
             {
-                "message": "Initial clean complete for up to 5 patent datasets.",
-                "raw_bucket": RAW_BUCKET,
-                "clean_bucket": CLEAN_BUCKET,
-                "results": results,
+                "message": "Assignee + Location (VA) + Application merged",
+                "rows": int(len(df_final)),
+                "output_file": f"s3://{CLEAN_BUCKET}/{CLEAN_KEY}",
             }
         ),
     }
