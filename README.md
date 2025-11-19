@@ -21,7 +21,7 @@ FCEDA desires an organized, enriched, and analysis-ready dataset that consolidat
 
 To address this need, our team developed a cloud-based ETL pipeline using AWS and an interactive Tableau dashboard to automate the ingestion, transformation, and visualization of business patent records.
 
-#Problem Statement
+#Problem Statement:
 
 Manual data processing was slowing down FCEDA’s ability to:
 
