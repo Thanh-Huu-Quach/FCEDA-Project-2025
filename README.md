@@ -4,7 +4,12 @@ Improving Processing/Analysis Time on Large Datasets Built for the Fairfax Count
 George Mason University | MIS 462 PREP Project
 
 #Team Members:
- * Thanh Quach
+  * Thanh Quach
+  * Amena Zaini
+  * Sri Avula
+  * Aalliyah Alva
+  * Denis Bykov
+
 Faculty: Dr. Brian K. Ngac
 Agency: Fairfax County Economic Development Authority
 #Project Overview
