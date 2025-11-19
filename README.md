@@ -46,5 +46,5 @@ We created a serverless data pipeline and business intelligence solution:
 
 #Demo:
 
-Watch Dashboard Walkthrough (YouTube)
-Screenshots available in [dashboard/](https://public.tableau.com/app/profile/thanh.quach4789/viz/Visualization_FCEDA_Dashboard_/MainDashboard)
+ * Watch Dashboard Walkthrough (YouTube)
+ * Screenshots available in [dashboard/](https://public.tableau.com/app/profile/thanh.quach4789/viz/Visualization_FCEDA_Dashboard_/MainDashboard)
