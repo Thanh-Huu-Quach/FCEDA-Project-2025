@@ -12,6 +12,7 @@ George Mason University | MIS 462 PREP Project
 
 Faculty: Dr. Brian K. Ngac
 Agency: Fairfax County Economic Development Authority
+
 #Project Overview:
 
 Public patent datasets play a crucial role for the Fairfax County Economic Development Authority (FCEDA), helping them identify valuable insights and potential business opportunities. However, the USPTO provides multiple detailed datasets, making it challenging to efficiently extract, clean, and organize the information needed to identify companies with high-value patents.
