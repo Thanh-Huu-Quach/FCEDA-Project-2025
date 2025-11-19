@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowReadRawApplicationFile",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::gmupatentproject26",
+        "arn:aws:s3:::gmupatentproject26/*"
+      ]
+    },
+    {
+      "Sid": "AllowWriteCleanedApplicationFile",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::gmupatentproject26cleandata",
+        "arn:aws:s3:::gmupatentproject26cleandata/*"
+      ]
+    }
+  ]
+}
