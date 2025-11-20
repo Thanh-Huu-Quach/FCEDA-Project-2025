@@ -11,6 +11,7 @@ George Mason University | MIS 462 PREP Project
   * Denis Bykov
 
 Faculty: Dr. Brian K. Ngac
+
 Agency: Fairfax County Economic Development Authority
 
 #Project Overview:
