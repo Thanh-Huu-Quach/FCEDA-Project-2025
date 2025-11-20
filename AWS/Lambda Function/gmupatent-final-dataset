@@ -1,0 +1,198 @@
+import json
+import os
+import boto3
+import pandas as pd
+s3 = boto3.client("s3")
+
+def lambda_handler(event, context):
+    raw_bucket = event["raw_bucket"]
+    raw_key = event["raw_key"]
+    clean_bucket = event["clean_bucket"]
+
+    # read raw file
+    obj = s3.get_object(Bucket=raw_bucket, Key=raw_key)
+    df = pd.read_csv(io.BytesIO(obj["Body"].read()), sep="\t", dtype="string")
+
+    # do cleaning on df here
+
+# Bucket that contains your CLEANED CSVs
+BUCKET = os.getenv("CLEAN_BUCKET", "gmupatentproject26cleandata")
+
+# Input cleaned files
+ASSIGNEE_APP_KEY = "cleaned/g_assignee_location_application_va_clean.csv"
+CPC_MERGED_KEY   = "cleaned/g_cpc_current_title_merged.csv"  # <-- use your exact file name
+
+# Final output file
+OUTPUT_KEY = "cleaned/FCEDA_VA_Patent_Data.csv"
+
+# Mapping of assignee_type codes to group titles (from your R code)
+assignee_labels = {
+    "2": "US Company or Corporation",
+    "3": "Foreign Company or Corporation",
+    "4": "US Individual",
+    "5": "Foreign Individual",
+    "6": "US Federal Government",
+    "7": "Foreign Government",
+    "8": "US County Government",
+    "9": "US State Government",
+}
+
+
+def squish(series):
+    return (
+        series.astype("string")
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+    )
+
+
+def lambda_handler(event, context):
+
+    # ---------- 1) Load Assignee + Location + Application ----------
+    print(f"Loading assignee/loc/app file: s3://{BUCKET}/{ASSIGNEE_APP_KEY}")
+    obj1 = s3.get_object(Bucket=BUCKET, Key=ASSIGNEE_APP_KEY)
+    dfA = pd.read_csv(obj1["Body"], dtype="string")
+    print(f"Assignee/Location/Application rows: {len(dfA)}")
+
+    # filing_date + Application_Filing_Year
+    if "filing_date" in dfA.columns:
+        dfA["filing_date"] = pd.to_datetime(dfA["filing_date"], errors="coerce")
+    else:
+        dfA["filing_date"] = pd.NaT
+
+    dfA["Application_Filing_Year"] = dfA["filing_date"].dt.year.astype("Int64")
+
+    # Ensure needed columns exist
+    for col in [
+        "disambig_assignee_organization",
+        "disambig_assignee_individual_name_first",
+        "disambig_assignee_individual_name_last",
+        "assignee_type",
+        "disambig_city",
+        "disambig_state",
+        "county",
+        "disambig_country",
+    ]:
+        if col not in dfA.columns:
+            dfA[col] = pd.NA
+        dfA[col] = dfA[col].astype("string")
+
+    # ---------- 2) Build Assignee_* derived fields ----------
+    org = squish(dfA["disambig_assignee_organization"].fillna(""))
+    full_name = squish(
+        dfA["disambig_assignee_individual_name_first"].fillna("") + " " +
+        dfA["disambig_assignee_individual_name_last"].fillna("")
+    )
+
+    # Assignee_Name
+    dfA["Assignee_Name"] = org.where(org != "", full_name)
+    dfA.loc[dfA["Assignee_Name"] == "", "Assignee_Name"] = pd.NA
+
+    # Assignee_Type_Code
+    dfA["Assignee_Type_Code"] = dfA["assignee_type"].astype("string")
+
+    # Assignee_Group_Title
+    has_type = dfA["Assignee_Type_Code"].notna() & (
+        dfA["Assignee_Type_Code"].str.strip() != ""
+    )
+    dfA["Assignee_Group_Title"] = "Unassigned"
+    dfA.loc[has_type, "Assignee_Group_Title"] = (
+        dfA.loc[has_type, "Assignee_Type_Code"].map(assignee_labels).fillna("Unassigned")
+    )
+
+    # Assignee_Group
+    dfA["Assignee_Group"] = "Unassigned"
+    dfA.loc[has_type, "Assignee_Group"] = (
+        dfA["Assignee_Type_Code"] + " - " + dfA["Assignee_Group_Title"]
+    )
+
+    # Assignee_Descriptive_Text
+    name_clean = dfA["Assignee_Name"].fillna("").str.strip()
+    dfA["Assignee_Descriptive_Text"] = dfA["Assignee_Group_Title"]
+    dfA.loc[name_clean != "", "Assignee_Descriptive_Text"] = (
+        name_clean[name_clean != ""] + " — " +
+        dfA.loc[name_clean != "", "Assignee_Group_Title"]
+    )
+
+    # Location fields
+    dfA["Assignee_City"] = dfA["disambig_city"]
+    dfA["Assignee_State"] = dfA["disambig_state"]
+    dfA["Assignee_County"] = dfA["county"]
+    dfA["Country"] = dfA["disambig_country"]
+
+    # ---------- 3) Load CPC_current_title_merged ----------
+    print(f"Loading CPC merged file: s3://{BUCKET}/{CPC_MERGED_KEY}")
+    obj2 = s3.get_object(Bucket=BUCKET, Key=CPC_MERGED_KEY)
+    dfC = pd.read_csv(obj2["Body"], dtype="string")
+    print(f"CPC merged rows: {len(dfC)}")
+
+    # We assume dfC already has:
+    # patent_id, cpc_class, cpc_subclass, cpc_group,
+    # cpc_class_title, cpc_subclass_title, cpc_group_title
+    # (and maybe cpc_section etc.)
+
+    # ---------- 4) Merge Assignee dataset with CPC merged ----------
+    df_final = pd.merge(
+        dfA,
+        dfC,
+        on="patent_id",
+        how="left",   # keep all VA assignee rows
+    )
+
+    df_final = df_final.drop_duplicates().reset_index(drop=True)
+    print(f"Rows after merge: {len(df_final)}")
+
+    # ---------- 5) Select ONLY the columns you want ----------
+    wanted_cols = [
+        "patent_id",
+
+        # Assignee fields
+        "Assignee_Name",
+        "Assignee_Type_Code",
+        "Assignee_Group_Title",
+        "Assignee_Group",
+        "Assignee_Descriptive_Text",
+
+        # Filing info
+        "Application_Filing_Year",
+
+        # Location
+        "Assignee_City",
+        "Assignee_State",
+        "Assignee_County",
+        "Country",
+
+        # CPC fields from CPC_current_title_merged
+        "cpc_class",
+        "cpc_class_title",
+        "cpc_subclass",
+        "cpc_subclass_title",
+        "cpc_group",
+        "cpc_group_title",
+    ]
+
+    existing_cols = [c for c in wanted_cols if c in df_final.columns]
+    df_out = df_final[existing_cols].copy()
+
+    print(f"Final columns: {list(df_out.columns)}")
+    print(f"Final rows: {len(df_out)}")
+
+    # ---------- 6) Save final combined dataset ----------
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=OUTPUT_KEY,
+        Body=df_out.to_csv(index=False).encode("utf-8"),
+    )
+
+    print(f"Wrote final dataset to s3://{BUCKET}/{OUTPUT_KEY}")
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps(
+            {
+                "message": "Master patent dataset (VA + CPC with titles) created",
+                "rows": int(len(df_out)),
+                "output_file": f"s3://{BUCKET}/{OUTPUT_KEY}",
+            }
+        ),
+    }
