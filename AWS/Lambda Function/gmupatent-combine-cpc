@@ -1,0 +1,153 @@
+import json
+import os
+import io
+import boto3
+import pandas as pd
+
+s3 = boto3.client("s3")
+
+def lambda_handler(event, context):
+    raw_bucket = event["raw_bucket"]
+    raw_key = event["raw_key"]
+    clean_bucket = event["clean_bucket"]
+
+    # read raw file
+    obj = s3.get_object(Bucket=raw_bucket, Key=raw_key)
+    df = pd.read_csv(io.BytesIO(obj["Body"].read()), sep="\t", dtype="string")
+
+    # do cleaning on df here
+
+RAW_BUCKET = os.getenv("RAW_BUCKET", "gmupatentproject26")
+CLEAN_BUCKET = os.getenv("CLEAN_BUCKET", "gmupatentproject26cleandata")
+
+RAW_CPC_CURRENT_KEY = "Dataset/g_cpc_current.tsv"
+RAW_CPC_TITLE_KEY = "Dataset/g_cpc_title.tsv"
+
+CLEAN_KEY = "cleaned/g_cpc_current_title_merged.csv"
+
+
+def clean_cpc_current(df):
+    keep_cols = [
+        "patent_id",
+        "cpc_sequence",
+        "cpc_class",
+        "cpc_subclass",
+        "cpc_group",
+    ]
+    df = df[keep_cols].copy()
+
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.replace(r"\t", "", regex=True).str.strip()
+
+    # only primary CPC record
+    df = df[df["cpc_sequence"] == "0"]
+
+    df = df.drop_duplicates()
+    return df
+
+
+def clean_cpc_title(df):
+    keep_cols = [
+        "cpc_class",
+        "cpc_subclass",
+        "cpc_group",
+        "cpc_class_title",
+        "cpc_subclass_title",
+        "cpc_group_title",
+    ]
+    df = df[keep_cols].copy()
+
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.replace(r"\t", "", regex=True).str.strip()
+
+    df = df.drop_duplicates()
+    return df
+
+
+def lambda_handler(event, context):
+    print("Starting CPC merge job...")
+
+    # -----------------------------------
+    # 1. Load & clean CPC TITLE (small)
+    # -----------------------------------
+    print(f"Loading CPC title file: {RAW_CPC_TITLE_KEY}")
+
+    resp_title = s3.get_object(Bucket=RAW_BUCKET, Key=RAW_CPC_TITLE_KEY)
+    df_title_raw = pd.read_csv(
+        resp_title["Body"],
+        sep="\t",
+        dtype="string",
+        low_memory=False,
+    )
+    df_title = clean_cpc_title(df_title_raw)
+
+    print(f"Cleaned CPC title rows: {len(df_title)}")
+
+    # -----------------------------------
+    # 2. Stream + clean CPC CURRENT (large)
+    # -----------------------------------
+    print(f"Streaming CPC current file: {RAW_CPC_CURRENT_KEY}")
+
+    resp_current = s3.get_object(Bucket=RAW_BUCKET, Key=RAW_CPC_CURRENT_KEY)
+
+    tmp_path = "/tmp/cpc_output.csv"
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    header_written = False
+
+    for chunk in pd.read_csv(
+        resp_current["Body"],
+        sep="\t",
+        dtype="string",
+        chunksize=300_000,
+        low_memory=False,
+        usecols=[
+            "patent_id",
+            "cpc_sequence",
+            "cpc_class",
+            "cpc_subclass",
+            "cpc_group",
+        ],
+    ):
+        df_c = clean_cpc_current(chunk)
+
+        # -------------------------------
+        # 3. Merge chunk with title table
+        # -------------------------------
+        df_merge = pd.merge(
+            df_c,
+            df_title,
+            on=["cpc_class", "cpc_subclass", "cpc_group"],
+            how="left",
+        )
+
+        # Append chunk to temp file
+        mode = "a" if header_written else "w"
+        df_merge.to_csv(
+            tmp_path,
+            mode=mode,
+            index=False,
+            header=not header_written,
+        )
+        header_written = True
+
+        print(f"Wrote merged chunk: {len(df_merge)} rows")
+
+    # -----------------------------------
+    # 4. Upload final merged file to S3
+    # -----------------------------------
+    print("Uploading final merged CSV...")
+
+    with open(tmp_path, "rb") as f:
+        s3.put_object(Bucket=CLEAN_BUCKET, Key=CLEAN_KEY, Body=f.read())
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps(
+            {
+                "message": "CPC current + CPC title merged successfully",
+                "output_file": f"s3://{CLEAN_BUCKET}/{CLEAN_KEY}",
+            }
+        ),
+    }
