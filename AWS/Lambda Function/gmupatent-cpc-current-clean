@@ -1,0 +1,120 @@
+import json, os, io, boto3, pandas as pd
+import os
+s3 = boto3.client("s3")
+
+def lambda_handler(event, context):
+    raw_bucket = event["raw_bucket"]
+    raw_key = event["raw_key"]
+    clean_bucket = event["clean_bucket"]
+
+    # read raw file
+    obj = s3.get_object(Bucket=raw_bucket, Key=raw_key)
+    df = pd.read_csv(io.BytesIO(obj["Body"].read()), sep="\t", dtype="string")
+
+    # do cleaning on df here
+
+RAW_BUCKET = os.getenv("RAW_BUCKET", "gmupatentproject26")
+CLEAN_BUCKET = os.getenv("CLEAN_BUCKET", "gmupatentproject26cleandata")
+RAW_KEY = "Dataset/g_cpc_current.tsv"
+CLEAN_KEY = "cleaned/g_cpc_current_clean.csv"
+
+
+def clean_cpc_current_file(df: pd.DataFrame) -> pd.DataFrame:
+    # Keep only required columns
+    keep_columns = [
+        "patent_id",
+        "cpc_sequence",
+        "cpc_section",
+        "cpc_class",
+        "cpc_subclass",
+        "cpc_group",
+    ]
+    df = df[keep_columns].copy()
+
+    # Remove tabs from string columns
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.replace(r"\t", "", regex=True).str.strip()
+
+    # Keep only primary classification (cpc_sequence == "0")
+    df = df[df["cpc_sequence"] == "0"]
+
+    # Remove duplicates within this chunk
+    df = df.drop_duplicates().reset_index(drop=True)
+    return df
+
+
+def lambda_handler(event, context):
+    print(f"Processing {RAW_KEY}...")
+
+    resp = s3.get_object(Bucket=RAW_BUCKET, Key=RAW_KEY)
+
+    # Temp file in Lambda's /tmp (512 MB limit)
+    tmp_path = "/tmp/g_cpc_current_clean.csv"
+
+    # If file exists from a previous run (warm container), remove it
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    header_written = False
+
+    # Stream + process in chunks
+    for chunk in pd.read_csv(
+        resp["Body"],          # <-- StreamingBody, don't .read() it
+        sep="\t",
+        dtype="string",
+        usecols=[
+            "patent_id",
+            "cpc_sequence",
+            "cpc_section",
+            "cpc_class",
+            "cpc_subclass",
+            "cpc_group",
+        ],
+        chunksize=500_000,     # tune chunk size if needed
+        low_memory=False,
+    ):
+        df_clean_chunk = clean_cpc_current_file(chunk)
+
+        # Append to temp CSV
+        mode = "a" if header_written else "w"
+        df_clean_chunk.to_csv(
+            tmp_path,
+            mode=mode,
+            index=False,
+            header=not header_written,
+        )
+        header_written = True
+
+        print(f"Wrote chunk with {len(df_clean_chunk)} rows")
+
+    # If no data after cleaning, create empty file
+    if not header_written:
+        # no rows at all
+        pd.DataFrame(
+            columns=[
+                "patent_id",
+                "cpc_sequence",
+                "cpc_section",
+                "cpc_class",
+                "cpc_subclass",
+                "cpc_group",
+            ]
+        ).to_csv(tmp_path, index=False)
+
+    # Upload final combined CSV to S3
+    with open(tmp_path, "rb") as f:
+        s3.put_object(Bucket=CLEAN_BUCKET, Key=CLEAN_KEY, Body=f.read())
+
+    print(f"Wrote cleaned file to s3://{CLEAN_BUCKET}/{CLEAN_KEY}")
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps(
+            {
+                "message": "g_cpc_current cleaned (chunked)",
+                # we can’t easily count rows without re-reading, so skip exact count
+            }
+        ),
+    }
+
+
