@@ -5,45 +5,6 @@ import io
 import boto3
 import pandas as pd
 
-lambda_client = boto3.client("lambda")
-
-def lambda_handler(event, context):
-    # S3 event data
-    record = event["Records"][0]
-    bucket = record["s3"]["bucket"]["name"]
-    key = record["s3"]["object"]["key"]
-
-    # Build a payload that all steps understand
-    payload = {
-        "raw_bucket": bucket,
-        "raw_key": key,
-        "clean_bucket": "gmupatentproject26cleandata"
-    }
-
-    # Call Lambda 2 synchronously
-    resp2 = lambda_client.invoke(
-        FunctionName="lambda_step2_clean",
-        InvocationType="RequestResponse",
-        Payload=json.dumps(payload).encode("utf-8")
-    )
-    step2_output = json.load(resp2["Payload"])
-
-    # Call Lambda 3, passing output from step 2
-    resp3 = lambda_client.invoke(
-        FunctionName="lambda_step3_transform",
-        InvocationType="RequestResponse",
-        Payload=json.dumps(step2_output).encode("utf-8")
-    )
-    step3_output = json.load(resp3["Payload"])
-
-    # Call Lambda 4
-    resp4 = lambda_client.invoke(
-        FunctionName="lambda_step4_export",
-        InvocationType="Event",  # fire and forget if you want
-        Payload=json.dumps(step3_output).encode("utf-8")
-    )
-
-    return {"status": "pipeline_started"}
 s3 = boto3.client("s3")
 
 RAW_BUCKET = os.getenv("RAW_BUCKET", "gmupatentproject26")
@@ -51,62 +12,11 @@ CLEAN_BUCKET = os.getenv("CLEAN_BUCKET", "gmupatentproject26cleandata")
 
 # Input files
 RAW_ASSIGNEE_KEY = "Dataset/g_assignee_disambiguated.tsv"
-RAW_LOCATION_KEY = "Dataset/g_location_disambiguated.tsv" 
+RAW_LOCATION_KEY = "Dataset/g_location_disambiguated.tsv"  # <-- CHECK this name in S3
 RAW_APPLICATION_KEY = "Dataset/g_application.tsv"
 
 # Output file (merged)
-CLEAN_KEY = "cleaned/g_import json
-import boto3
-
-lambda_client = boto3.client("lambda")
-
-CLEAN_BUCKET = "gmupatentproject2clean"   # <- your clean bucket
-
-def lambda_handler(event, context):
-    # S3 event data (which raw file was uploaded)
-    record = event["Records"][0]
-    bucket = record["s3"]["bucket"]["name"]
-    key = record["s3"]["object"]["key"]
-
-    print(f"Orchestrator triggered by: s3://{bucket}/{key}")
-
-    # Base payload that all step Lambdas understand
-    base_payload = {
-        "raw_bucket": bucket,
-        "raw_key": key,                # some steps will ignore this
-        "clean_bucket": CLEAN_BUCKET,
-    }
-
-    # ---- Step 1: clean application (always safe to call, it just overwrites) ----
-    lambda_client.invoke(
-        FunctionName="lambda_clean_application",   # <- exact name in AWS
-        InvocationType="RequestResponse",
-        Payload=json.dumps(base_payload).encode("utf-8"),
-    )
-
-    # ---- Step 2: clean assignee + location + application (VA) ----
-    lambda_client.invoke(
-        FunctionName="lambda_clean_assignee_location_app",
-        InvocationType="RequestResponse",
-        Payload=json.dumps(base_payload).encode("utf-8"),
-    )
-
-    # ---- Step 3: CPC current + title merged ----
-    lambda_client.invoke(
-        FunctionName="lambda_clean_cpc_merged",
-        InvocationType="RequestResponse",
-        Payload=json.dumps(base_payload).encode("utf-8"),
-    )
-
-    # ---- Step 4: final master dataset ----
-    lambda_client.invoke(
-        FunctionName="lambda_build_master_dataset",
-        InvocationType="Event",  # fire-and-forget is OK for final step
-        Payload=json.dumps(base_payload).encode("utf-8"),
-    )
-
-    return {"status": "pipeline_started"}
-_clean.csv"
+CLEAN_KEY = "cleaned/g_assignee_location_application_va_clean.csv"
 
 def clean_application_file(df: pd.DataFrame) -> pd.DataFrame:
     keep_columns = ["patent_id", "filing_date"]
