@@ -37,6 +37,7 @@ We created a serverless data pipeline and business intelligence solution:
  * AWS Lambda + S3: Automates the ingestion, cleaning, and transformation of patent datasets
  * Allows users to filter by filing year, company name, Cooperative Patent Classification (CPC) and keyword
  * Output: Cleaned CSVs and real-time dashboard updates ready for use in Tableau, Salesforce, and ArcGIS
+
 #Tech Stack:
 
  * R (Rstudio) 
